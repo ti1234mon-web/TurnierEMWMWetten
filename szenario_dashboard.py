@@ -1,0 +1,878 @@
+# szenario_dashboard.py
+# ============================================================
+# ALL-IN-ONE: CONFIG + MODELS + LOGIC + UI + APP
+# MIT 8 KPIs (inkl. FORM), TEAM-KLASSIFIZIERUNG,
+# SPIELSTIL-MODULATOR, MODULATION, POISSON & SZENARIO-ENGINE
+# ============================================================
+
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from dataclasses import dataclass
+from typing import List, Tuple, Dict
+import math
+
+# ============================================================
+# 1. CONFIG
+# ============================================================
+
+KPIS = [
+    "Motivation",
+    "Offensive",
+    "Defensive",
+    "Spielweise",
+    "Taktik",
+    "Spielrelevanz",
+    "Formation",
+    "Form"  # NEU: 8. KPI
+]
+
+KPI_OPTIONS = {
+    "Motivation": ["Hoch", "Niedrig"],
+    "Offensive": ["Stark", "Schwach"],
+    "Defensive": ["Stark", "Schwach"],
+    "Spielweise": ["Aggressiv", "Defensiv"],
+    "Taktik": ["Hoch stehend", "Tief stehend"],
+    "Spielrelevanz": ["Hoch", "Niedrig"],
+    "Formation": [
+        "3-4-3 (sehr aggressiv)",
+        "4-3-3 (aggressiv)",
+        "3-5-2 (aggressiv/ausgewogen)",
+        "4-2-3-1 (ausgewogen)",
+        "4-4-2 (defensiv)",
+        "5-3-2 (sehr defensiv)"
+    ],
+    "Form": ["Top-Form", "Gute Form", "Normal", "Schlechte Form", "Krise"]  # NEU
+}
+
+AGGRESSIVE_FORMATIONS = [
+    "3-4-3 (sehr aggressiv)",
+    "4-3-3 (aggressiv)",
+    "3-5-2 (aggressiv/ausgewogen)"
+]
+
+# ============================================================
+# 1.1 FORM-FAKTOR (aus KPI)
+# ============================================================
+
+FORM_FACTOR_MAP = {
+    "Top-Form": 1.5,
+    "Gute Form": 1.2,
+    "Normal": 1.0,
+    "Schlechte Form": 0.7,
+    "Krise": 0.5
+}
+
+def get_form_factor(form_state: str) -> float:
+    """Gibt den Form-Faktor für einen Form-Zustand zurück."""
+    return FORM_FACTOR_MAP.get(form_state, 1.0)
+
+# ============================================================
+# 1.2 TEAM-KLASSIFIZIERUNG (ERWEITERTE LISTE)
+# ============================================================
+
+TEAM_CLASSES = {
+    # Weltklasse (Basis-Bonus 3.0)
+    "Frankreich": 3.0,
+    "Argentinien": 3.0,
+    "Brasilien": 3.0,
+    "England": 3.0,
+    "Spanien": 3.0,
+    "Italien": 3.0,
+
+    # Top-Nation (Basis-Bonus 2.5)
+    "Deutschland": 2.5,
+    "Portugal": 2.5,
+    "Niederlande": 2.5,
+    "Belgien": 2.5,
+    "Kroatien": 2.5,
+
+    # Etablierte Nation (Basis-Bonus 2.0)
+    "Uruguay": 2.0,
+    "Schweiz": 2.0,
+    "Senegal": 2.0,
+    "Japan": 2.0,
+    "Südkorea": 2.0,
+    "USA": 2.0,
+    "Mexiko": 2.0,
+    "Schweden": 2.0,
+    "Norwegen": 2.0,
+    "Polen": 2.0,
+    "Dänemark": 2.0,
+    "Österreich": 2.0,
+    "Tschechien": 2.0,
+    "Kolumbien": 2.0,
+    "Marokko": 2.0,
+    "Ägypten": 2.0,
+    "Türkei": 2.0,
+    "Wales": 2.0,
+    "Schottland": 2.0,
+    "Ecuador": 2.0,
+    "Kanada": 2.0,
+    "Australien": 2.0,
+    "Ukraine": 2.0,
+    "Serbien": 2.0,
+    "Kamerun": 2.0,
+    "Nigeria": 2.0,
+    "Ghana": 2.0,
+    "Tunesien": 2.0,
+    "Algerien": 2.0,
+    "Saudi-Arabien": 2.0,
+    "Iran": 2.0,
+    "Irak": 2.0,
+    "Neuseeland": 2.0,
+    "Panama": 2.0,
+    "Costa Rica": 2.0,
+    "Honduras": 2.0,
+    "Jamaika": 2.0,
+    "Elfenbeinküste": 2.0,
+    "Burkina Faso": 2.0,
+    "Mali": 2.0,
+    "Südafrika": 2.0,
+    "Kongo": 2.0,
+    "Uganda": 2.0,
+
+    # Aufsteiger (Basis-Bonus 1.5)
+    "Kap Verde": 1.5,
+    "Jordanien": 1.5,
+    "Usbekistan": 1.5,
+    "Katar": 1.5,
+    "Haiti": 1.5,
+    "Curaçao": 1.5,
+    "Island": 1.5,
+    "Slowakei": 1.5,
+    "Slowenien": 1.5,
+    "Nordirland": 1.5,
+    "Georgien": 1.5,
+    "Armenien": 1.5,
+    "Kasachstan": 1.5,
+    "Aserbaidschan": 1.5,
+    "Israel": 1.5,
+    "Zypern": 1.5,
+
+    # Außenseiter (Basis-Bonus 1.0)
+    "Grenada": 1.0,
+    "Färöer": 1.0,
+    "Liechtenstein": 1.0,
+}
+
+ALL_TEAMS = list(TEAM_CLASSES.keys())
+ALL_TEAMS.sort()
+
+# ============================================================
+# 1.3 LAMBDA-MAP (max. 4.0 Tore)
+# ============================================================
+
+def get_lambda_from_expected(expected_goals: float) -> float:
+    """Wandelt erwartete Torzahl in Lambda-Wert für Poisson um (max. 4.0)."""
+    if expected_goals <= 0:
+        return 0.0
+    return min(max(expected_goals, 0.0), 4.0)
+
+# ============================================================
+# 2. MODELS
+# ============================================================
+
+@dataclass
+class TeamScenario:
+    team_name: str
+    kpis: Dict[str, str]
+    bits: List[int] = None
+    index: int = None
+    bonus: int = None
+    base_bonus: float = None
+    expected_goals: float = None
+
+    def __post_init__(self):
+        self.bits = self.create_bits()
+        self.index = self.calculate_index()
+        self.bonus = self.calculate_bonus()
+        self.base_bonus = TEAM_CLASSES.get(self.team_name, 1.0)
+        self.expected_goals = self.calculate_expected_goals()
+
+    def create_bits(self) -> List[int]:
+        # Form fließt NICHT in die Bits ein!
+        return [
+            1 if self.kpis["Motivation"] == "Hoch" else 0,
+            1 if self.kpis["Offensive"] == "Stark" else 0,
+            1 if self.kpis["Defensive"] == "Stark" else 0,
+            1 if self.kpis["Spielweise"] == "Aggressiv" else 0,
+            1 if self.kpis["Taktik"] == "Hoch stehend" else 0,
+            1 if self.kpis["Spielrelevanz"] == "Hoch" else 0,
+            1 if self.kpis["Formation"] in AGGRESSIVE_FORMATIONS else 0
+        ]
+
+    def calculate_index(self) -> int:
+        index = 0
+        for i, bit in enumerate(self.bits):
+            index += bit * (2 ** (6 - i))
+        return index
+
+    def calculate_bonus(self) -> int:
+        return sum(self.bits)
+
+    def calculate_expected_goals(self) -> float:
+        """Berechnet erwartete Torzahl mit KPI-Bonus, Basis-Bonus, Form & Spielstil."""
+        # Team-Faktor
+        if self.base_bonus >= 3.0:
+            team_factor = 1.0
+        elif self.base_bonus >= 2.5:
+            team_factor = 0.9
+        elif self.base_bonus >= 2.0:
+            team_factor = 0.8
+        elif self.base_bonus >= 1.5:
+            team_factor = 0.7
+        else:
+            team_factor = 0.6
+
+        # Form-Faktor (aus KPI)
+        form_state = self.kpis.get("Form", "Normal")
+        form_factor = get_form_factor(form_state)
+
+        # Basis-Erwartung
+        expected = (self.bonus * team_factor) + (self.base_bonus * 0.5)
+
+        # Form-Faktor anwenden
+        expected *= form_factor
+
+        # ─── SPIELSTIL-MODULATOR ───
+        spielweise = self.kpis["Spielweise"]
+        taktik = self.kpis["Taktik"]
+
+        if spielweise == "Defensiv" and taktik == "Tief stehend":
+            expected *= 0.5
+        elif spielweise == "Aggressiv" and taktik == "Hoch stehend":
+            expected *= 1.3
+        elif spielweise == "Defensiv" and taktik == "Hoch stehend":
+            expected *= 0.8
+        elif spielweise == "Aggressiv" and taktik == "Tief stehend":
+            expected *= 1.0
+
+        # Wenn Defensive schwach + defensiv gespielt → noch weniger Tore
+        if self.kpis["Defensive"] == "Schwach" and spielweise == "Defensiv":
+            expected *= 0.9
+
+        return max(0.0, min(expected, 4.0))
+
+@dataclass
+class MatchScenario:
+    team_a: TeamScenario
+    team_b: TeamScenario
+
+    @property
+    def lambda_a(self) -> float:
+        return get_lambda_from_expected(self.team_a.expected_goals)
+
+    @property
+    def lambda_b(self) -> float:
+        return get_lambda_from_expected(self.team_b.expected_goals)
+
+    @property
+    def bonus_diff(self) -> int:
+        return self.team_a.bonus - self.team_b.bonus
+
+    @property
+    def scenario_type(self) -> Tuple[str, str]:
+        a, b = self.team_a.bonus, self.team_b.bonus
+        if a >= 6 and b <= 1:
+            return "Dominant (A)", "A ist extrem überlegen"
+        elif b >= 6 and a <= 1:
+            return "Dominant (B)", "B ist extrem überlegen"
+        elif a >= 5 and b <= 2:
+            return "Überlegen (A)", "A ist deutlich stärker"
+        elif b >= 5 and a <= 2:
+            return "Überlegen (B)", "B ist deutlich stärker"
+        elif abs(a - b) <= 1:
+            return "Ausgeglichen", "Beide Teams sind ausgeglichen"
+        else:
+            return "Standard", "A ist stärker" if a > b else "B ist stärker" if b > a else "Remis"
+
+# ============================================================
+# 3. LOGIC (MIT MODULATION, POISSON, SZENARIO-ENGINE)
+# ============================================================
+
+def modulate_kpis(kpis: dict) -> dict:
+    """Moduliert KPIs basierend auf Motivation und Spielrelevanz."""
+    offensive = kpis["Offensive"]
+    defensive = kpis["Defensive"]
+    spielweise = kpis["Spielweise"]
+    taktik = kpis["Taktik"]
+    motivation = kpis["Motivation"]
+    relevanz = kpis["Spielrelevanz"]
+
+    if motivation == "Hoch":
+        if offensive == "Stark":
+            offensive_eff = "Stark (verstärkt)"
+        else:
+            offensive_eff = "Mittel (verstärkt)"
+
+        if defensive == "Stark":
+            defensive_eff = "Stark (verstärkt)"
+        else:
+            defensive_eff = "Mittel (verstärkt)"
+
+        if spielweise == "Aggressiv":
+            spielweise_eff = "Aggressiv (sehr)"
+        else:
+            spielweise_eff = "Aggressiv (moderat)"
+
+    else:
+        if offensive == "Stark":
+            offensive_eff = "Mittel (abgeschwächt)"
+        else:
+            offensive_eff = "Schwach (abgeschwächt)"
+
+        if defensive == "Stark":
+            defensive_eff = "Mittel (abgeschwächt)"
+        else:
+            defensive_eff = "Schwach (abgeschwächt)"
+
+        if spielweise == "Aggressiv":
+            spielweise_eff = "Defensiv (abgeschwächt)"
+        else:
+            spielweise_eff = "Defensiv (sehr)"
+
+    if relevanz == "Hoch":
+        if "Stark" in defensive_eff or "Mittel" in defensive_eff:
+            defensive_eff = "Stark (sehr)"
+        else:
+            defensive_eff = "Mittel (verstärkt)"
+
+        if "Aggressiv" in spielweise_eff:
+            spielweise_eff = "Aggressiv (sehr)"
+        else:
+            spielweise_eff = "Aggressiv (moderat)"
+
+    else:
+        if "Stark" in offensive_eff or "Mittel" in offensive_eff:
+            offensive_eff = "Mittel (abgeschwächt)"
+        else:
+            offensive_eff = "Schwach (abgeschwächt)"
+
+        if "Aggressiv" in spielweise_eff:
+            spielweise_eff = "Defensiv (abgeschwächt)"
+        else:
+            spielweise_eff = "Defensiv (sehr)"
+
+    return {
+        "Offensive": offensive_eff,
+        "Defensive": defensive_eff,
+        "Spielweise": spielweise_eff,
+        "Taktik": taktik,
+        "Motivation": motivation,
+        "Spielrelevanz": relevanz,
+        "Formation": kpis["Formation"],
+        "Form": kpis["Form"]  # Form bleibt erhalten
+    }
+
+def analyze_scenario(team_a_kpis: dict, team_b_kpis: dict) -> Dict:
+    """Erweiterte Szenario-Engine."""
+    mod_a = modulate_kpis(team_a_kpis)
+    mod_b = modulate_kpis(team_b_kpis)
+
+    a_off = mod_a["Offensive"]
+    a_def = mod_a["Defensive"]
+    a_spiel = mod_a["Spielweise"]
+    a_taktik = mod_a["Taktik"]
+    a_mot = mod_a["Motivation"]
+    a_rel = mod_a["Spielrelevanz"]
+
+    b_off = mod_b["Offensive"]
+    b_def = mod_b["Defensive"]
+    b_spiel = mod_b["Spielweise"]
+    b_taktik = mod_b["Taktik"]
+    b_mot = mod_b["Motivation"]
+    b_rel = mod_b["Spielrelevanz"]
+
+    if "Stark" in a_off and "Schwach" in a_def and "Aggressiv" in a_spiel:
+        if a_mot == "Hoch" and a_rel == "Hoch":
+            szenario_a = "⚡ Offensiv-Show (extrem)"
+            beschreibung_a = "Team A spielt extrem offensiv – Motivation und Relevanz verstärken den Drang nach vorne."
+            tendenz_a = "4:2, 5:3"
+        elif a_mot == "Niedrig" and a_rel == "Niedrig":
+            szenario_a = "📉 Offensiv-Show (abgeschwächt)"
+            beschreibung_a = "Team A spielt offensiv, aber ohne echten Druck – Motivation und Relevanz fehlen."
+            tendenz_a = "2:1, 1:1"
+        else:
+            szenario_a = "⚽ Offensiv-Show (normal)"
+            beschreibung_a = "Team A spielt offensiv, aber ohne extreme Verstärkung durch Motivation oder Relevanz."
+            tendenz_a = "3:2, 2:2"
+    elif "Stark" in a_def and "Schwach" in a_off and "Tief stehend" in a_taktik:
+        if a_mot == "Hoch" and a_rel == "Hoch":
+            szenario_a = "🛡️ Beton-Mauer (extrem)"
+            beschreibung_a = "Team A steht extrem tief, verteidigt mit allem – muss unbedingt gewinnen."
+            tendenz_a = "0:0, 1:0"
+        else:
+            szenario_a = "🧱 Beton-Mauer (normal)"
+            beschreibung_a = "Team A steht tief und verteidigt kompakt."
+            tendenz_a = "0:0, 0:1"
+    elif "Stark" in a_def and "Stark" in a_off and "Aggressiv" in a_spiel:
+        if a_mot == "Hoch" and a_rel == "Hoch":
+            szenario_a = "🔥 Dominant (extrem)"
+            beschreibung_a = "Team A dominiert das Spiel – hohe Motivation und Relevanz verstärken die Kontrolle."
+            tendenz_a = "3:0, 4:1"
+        else:
+            szenario_a = "🔥 Dominant (normal)"
+            beschreibung_a = "Team A kontrolliert das Spiel, aber ohne extreme Intensität."
+            tendenz_a = "2:0, 2:1"
+    elif "Schwach" in a_off and "Schwach" in a_def and "Defensiv" in a_spiel:
+        if a_mot == "Hoch":
+            szenario_a = "🌀 Verzweifelt (hohe Motivation)"
+            beschreibung_a = "Team A ist schwach, aber motiviert – kämpft um jeden Ball."
+            tendenz_a = "0:0, 1:1"
+        else:
+            szenario_a = "😴 Harmlos"
+            beschreibung_a = "Team A ist weder offensiv noch defensiv überzeugend."
+            tendenz_a = "0:2, 0:3"
+    else:
+        szenario_a = "📊 Standard"
+        beschreibung_a = "Ausgeglichene Taktik – keine extremen Wechselwirkungen."
+        tendenz_a = "1:1, 2:1, 1:2"
+
+    if "Beton-Mauer" in szenario_a and "Offensiv-Show" in b_off and "Aggressiv" in b_spiel:
+        szenario_match = "🔄 Offensiv-Show vs. Beton-Mauer"
+        beschreibung_match = "Team B drückt, Team A steht tief. Team B wird viele Chancen haben, aber Team A verteidigt kompakt."
+        tendenz_match = "1:0, 2:1 oder 0:0"
+    elif "Dominant" in szenario_a and "Konter" in b_off:
+        szenario_match = "⚔️ Dominant vs. Konter"
+        beschreibung_match = "Team A dominiert, aber Team B lauert auf Konter."
+        tendenz_match = "1:0 für A, oder 1:1"
+    else:
+        szenario_match = szenario_a
+        beschreibung_match = beschreibung_a
+        tendenz_match = tendenz_a
+
+    return {
+        "titel": szenario_match,
+        "beschreibung": beschreibung_match,
+        "tendenz": tendenz_match,
+        "mod_a": mod_a,
+        "mod_b": mod_b
+    }
+
+def get_poisson_probability(actual_goals: int, expected_goals: float) -> float:
+    if expected_goals <= 0:
+        return 0.0 if actual_goals > 0 else 1.0
+    return (pow(expected_goals, actual_goals) * math.exp(-expected_goals)) / math.factorial(actual_goals)
+
+def get_best_guess(match: MatchScenario, max_goals: int = 4) -> Tuple[int, int]:
+    lam_a = match.lambda_a
+    lam_b = match.lambda_b
+
+    best_result = (0, 0)
+    best_probability = -1.0
+
+    for ga in range(max_goals + 1):
+        for gb in range(max_goals + 1):
+            prob_a = get_poisson_probability(ga, lam_a)
+            prob_b = get_poisson_probability(gb, lam_b)
+            total_prob = prob_a * prob_b
+
+            if total_prob > best_probability:
+                best_probability = total_prob
+                best_result = (ga, gb)
+
+    return best_result
+
+def get_possible_results_with_probabilities(match: MatchScenario, max_goals: int = 4) -> List[Tuple[int, int, float]]:
+    lam_a = match.lambda_a
+    lam_b = match.lambda_b
+
+    results = []
+    for ga in range(max_goals + 1):
+        for gb in range(max_goals + 1):
+            prob_a = get_poisson_probability(ga, lam_a)
+            prob_b = get_poisson_probability(gb, lam_b)
+            total_prob = prob_a * prob_b
+            if total_prob > 0:
+                results.append((ga, gb, round(total_prob, 4)))
+    return sorted(results, key=lambda x: x[2], reverse=True)
+
+def get_all_128_combinations() -> List[Tuple[int, str, int]]:
+    combinations = []
+    for i in range(128):
+        bits = format(i, '07b')
+        bonus = bin(i).count("1")
+        combinations.append((i, bits, bonus))
+    return combinations
+
+def kpi_to_checkmark(kpi_dict: dict, kpi_name: str) -> str:
+    state = kpi_dict.get(kpi_name, "Niedrig")
+    if kpi_name == "Motivation":
+        return "✅" if state == "Hoch" else "❌"
+    elif kpi_name == "Offensive":
+        return "✅" if state == "Stark" else "❌"
+    elif kpi_name == "Defensive":
+        return "✅" if state == "Stark" else "❌"
+    elif kpi_name == "Spielweise":
+        return "✅" if state == "Aggressiv" else "❌"
+    elif kpi_name == "Taktik":
+        return "✅" if state == "Hoch stehend" else "❌"
+    elif kpi_name == "Spielrelevanz":
+        return "✅" if state == "Hoch" else "❌"
+    elif kpi_name == "Formation":
+        return "✅" if state in AGGRESSIVE_FORMATIONS else "❌"
+    elif kpi_name == "Form":
+        if state in ["Top-Form", "Gute Form"]:
+            return "✅"
+        elif state in ["Schlechte Form", "Krise"]:
+            return "❌"
+        else:
+            return "➖"  # Normal → neutral
+    return "❌"
+
+def get_modulated_kpi_values(mod_kpis: dict) -> dict:
+    mapping = {
+        "Schwach (abgeschwächt)": 1,
+        "Schwach": 2,
+        "Mittel (abgeschwächt)": 3,
+        "Mittel": 4,
+        "Mittel (verstärkt)": 5,
+        "Stark (verstärkt)": 6,
+        "Stark (sehr)": 7,
+        "Aggressiv (moderat)": 6,
+        "Aggressiv (sehr)": 7,
+        "Defensiv (abgeschwächt)": 3,
+        "Defensiv (sehr)": 2,
+        "Hoch stehend": 8,
+        "Tief stehend": 2,
+        "Hoch": 9,
+        "Niedrig": 2,
+        "3-4-3 (sehr aggressiv)": 9,
+        "4-3-3 (aggressiv)": 8,
+        "3-5-2 (aggressiv/ausgewogen)": 7,
+        "4-2-3-1 (ausgewogen)": 6,
+        "4-4-2 (defensiv)": 4,
+        "5-3-2 (sehr defensiv)": 2,
+        "Top-Form": 10,
+        "Gute Form": 8,
+        "Normal": 6,
+        "Schlechte Form": 3,
+        "Krise": 1
+    }
+    numeric = {}
+    for kpi, value in mod_kpis.items():
+        numeric[kpi] = mapping.get(value, 5)
+    return numeric
+
+# ============================================================
+# 4. UI (Streamlit-Komponenten)
+# ============================================================
+
+def render_team_input(team_name_label: str, prefix: str, default_team: str = "Frankreich") -> Tuple[str, dict]:
+    st.markdown(f"### {team_name_label}")
+    
+    team = st.selectbox(
+        "Team",
+        options=ALL_TEAMS,
+        key=f"{prefix}_team",
+        index=ALL_TEAMS.index(default_team) if default_team in ALL_TEAMS else 0
+    )
+    
+    kpis = {}
+    cols = st.columns(2)
+    for i, kpi in enumerate(KPIS):
+        with cols[i % 2]:
+            if kpi == "Form":
+                kpis[kpi] = st.selectbox(
+                    kpi,
+                    options=KPI_OPTIONS[kpi],
+                    key=f"{prefix}_{kpi}",
+                    help="Top-Form: 1.5x Tore, Krise: 0.5x Tore"
+                )
+            else:
+                kpis[kpi] = st.selectbox(
+                    kpi,
+                    options=KPI_OPTIONS[kpi],
+                    key=f"{prefix}_{kpi}"
+                )
+    return team, kpis
+
+def render_bits(index: int) -> str:
+    return format(index, '07b')
+
+def render_calculation_pipeline(match: MatchScenario):
+    st.markdown("""
+        <div style="display: flex; justify-content: center; width: 100%; margin: 0.1rem 0 1.5rem 0;">
+            <p class="section-headline">🧮 Berechnung</p>
+        </div>
+    """, unsafe_allow_html=True)
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown(f"""
+            <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; padding: 1rem; text-align: center;">
+                <div style="color: rgba(255,255,255,0.3); font-size: 0.8rem;">Bits</div>
+                <div style="font-size: 1.2rem; font-weight: 600; color: #D4A853;">{render_bits(match.team_a.index)}</div>
+                <div style="font-size: 1.2rem; font-weight: 600; color: #D4A853;">{render_bits(match.team_b.index)}</div>
+            </div>
+        """, unsafe_allow_html=True)
+    with col2:
+        st.markdown(f"""
+            <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; padding: 1rem; text-align: center;">
+                <div style="color: rgba(255,255,255,0.3); font-size: 0.8rem;">Index</div>
+                <div style="font-size: 1.2rem; font-weight: 600; color: #D4A853;">{match.team_a.index}</div>
+                <div style="font-size: 1.2rem; font-weight: 600; color: #D4A853;">{match.team_b.index}</div>
+            </div>
+        """, unsafe_allow_html=True)
+    with col3:
+        st.markdown(f"""
+            <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; padding: 1rem; text-align: center;">
+                <div style="color: rgba(255,255,255,0.3); font-size: 0.8rem;">KPI-Bonus</div>
+                <div style="font-size: 1.2rem; font-weight: 600; color: #D4A853;">{match.team_a.bonus}</div>
+                <div style="font-size: 1.2rem; font-weight: 600; color: #D4A853;">{match.team_b.bonus}</div>
+                <div style="color: rgba(255,255,255,0.3); font-size: 0.6rem; margin-top: 0.3rem;">
+                    Basis: {match.team_a.base_bonus:.1f} / {match.team_b.base_bonus:.1f}
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
+
+def render_match_analysis(match: MatchScenario):
+    st.markdown("""
+        <div style="display: flex; justify-content: center; width: 100%; margin: 0.1rem 0 1.5rem 0;">
+            <p class="section-headline">📊 Matchanalyse</p>
+        </div>
+    """, unsafe_allow_html=True)
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Team A KPI-Bonus", match.team_a.bonus)
+    with col2:
+        st.metric("Team B KPI-Bonus", match.team_b.bonus)
+    with col3:
+        st.metric("Differenz", f"{match.bonus_diff:+d}")
+    with col4:
+        st.metric("Erwartete Tore (λ)", f"{match.lambda_a:.2f} – {match.lambda_b:.2f}")
+
+def render_scenario(match: MatchScenario):
+    scenario, reasoning = match.scenario_type
+    st.markdown("""
+        <div style="display: flex; justify-content: center; width: 100%; margin: 0.1rem 0 1.5rem 0;">
+            <p class="section-headline">📌 Basis-Szenario</p>
+        </div>
+    """, unsafe_allow_html=True)
+    st.markdown(f"""
+        <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; padding: 1.5rem; text-align: center;">
+            <div style="font-size: 1.8rem; font-weight: 700; color: #D4A853;">{scenario}</div>
+            <div style="color: rgba(255,255,255,0.5);">{reasoning}</div>
+        </div>
+    """, unsafe_allow_html=True)
+
+def render_scenario_analysis(match: MatchScenario):
+    scenario = analyze_scenario(match.team_a.kpis, match.team_b.kpis)
+    st.markdown("""
+        <div style="display: flex; justify-content: center; width: 100%; margin: 0.1rem 0 1.5rem 0;">
+            <p class="section-headline">🧠 Modulierte Szenario-Analyse</p>
+        </div>
+    """, unsafe_allow_html=True)
+    st.markdown(f"""
+        <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; padding: 1.5rem; text-align: center;">
+            <div style="font-size: 1.8rem; font-weight: 700; color: #D4A853;">{scenario['titel']}</div>
+            <div style="color: rgba(255,255,255,0.7); margin-top: 0.3rem;">{scenario['beschreibung']}</div>
+            <div style="color: rgba(255,255,255,0.4); margin-top: 0.3rem;">Tendenz: {scenario['tendenz']}</div>
+        </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("### 📊 Modulierte KPIs (effektiv)")
+    mod_a = scenario['mod_a']
+    mod_b = scenario['mod_b']
+    mod_data = []
+    for kpi in KPIS:
+        mod_data.append({
+            "KPI": kpi,
+            f"{match.team_a.team_name} (effektiv)": mod_a.get(kpi, "—"),
+            f"{match.team_b.team_name} (effektiv)": mod_b.get(kpi, "—")
+        })
+    df_mod = pd.DataFrame(mod_data)
+    st.dataframe(df_mod, use_container_width=True, hide_index=True)
+
+    render_modulated_kpi_chart(mod_a, mod_b, match.team_a.team_name, match.team_b.team_name)
+
+def render_modulated_kpi_chart(mod_a: dict, mod_b: dict, name_a: str, name_b: str):
+    st.markdown("### 📈 Modulationseffekt (grafisch)")
+    kpis = ["Offensive", "Defensive", "Spielweise", "Taktik", "Motivation", "Spielrelevanz", "Formation", "Form"]
+    values_a = get_modulated_kpi_values(mod_a)
+    values_b = get_modulated_kpi_values(mod_b)
+
+    df_chart = pd.DataFrame({
+        "KPI": kpis,
+        name_a: [values_a[k] for k in kpis],
+        name_b: [values_b[k] for k in kpis]
+    })
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=df_chart["KPI"],
+        y=df_chart[name_a],
+        name=name_a,
+        marker_color="#D4A853"
+    ))
+    fig.add_trace(go.Bar(
+        x=df_chart["KPI"],
+        y=df_chart[name_b],
+        name=name_b,
+        marker_color="#F5D98E"
+    ))
+    fig.update_layout(
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="white"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+        barmode="group"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+def render_best_guess(match: MatchScenario):
+    ga, gb = get_best_guess(match)
+    st.markdown("""
+        <div style="display: flex; justify-content: center; width: 100%; margin: 0.1rem 0 1.5rem 0;">
+            <p class="section-headline">🏆 Best Guess (Poisson)</p>
+        </div>
+    """, unsafe_allow_html=True)
+    st.markdown(f"""
+        <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; padding: 1.5rem; text-align: center;">
+            <div style="font-size: 3rem; font-weight: 800; color: #D4A853;">{ga} : {gb}</div>
+            <div style="color: rgba(255,255,255,0.3); font-size: 0.8rem;">
+                λ: {match.lambda_a:.2f} – {match.lambda_b:.2f}
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
+
+def render_possible_results(match: MatchScenario):
+    results = get_possible_results_with_probabilities(match)
+    st.markdown("""
+        <div style="display: flex; justify-content: center; width: 100%; margin: 0.1rem 0 1.5rem 0;">
+            <p class="section-headline">📋 Alle möglichen Ergebnisse (Poisson)</p>
+        </div>
+    """, unsafe_allow_html=True)
+    data = []
+    for ga, gb, prob in results:
+        data.append({"Ergebnis": f"{ga}:{gb}", "Wahrscheinlichkeit": f"{prob*100:.2f} %"})
+    df = pd.DataFrame(data)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+def render_kpi_comparison(kpis_a: dict, kpis_b: dict, name_a: str, name_b: str):
+    st.markdown("""
+        <div style="display: flex; justify-content: center; width: 100%; margin: 0.1rem 0 1.5rem 0;">
+            <p class="section-headline">📋 KPI-Vergleich (Original)</p>
+        </div>
+    """, unsafe_allow_html=True)
+    data = []
+    for kpi in KPIS:
+        data.append({
+            "KPI": kpi,
+            name_a: kpi_to_checkmark(kpis_a, kpi),
+            name_b: kpi_to_checkmark(kpis_b, kpi)
+        })
+    df = pd.DataFrame(data)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+def render_bonus_distribution():
+    st.markdown("""
+        <div style="display: flex; justify-content: center; width: 100%; margin: 0.1rem 0 1.5rem 0;">
+            <p class="section-headline">📊 Bonus-Verteilung (128 Kombinationen)</p>
+        </div>
+    """, unsafe_allow_html=True)
+    counts = [bin(i).count("1") for i in range(128)]
+    df = pd.DataFrame({"Bonus": counts})
+    fig = px.histogram(df, x="Bonus", nbins=8, color_discrete_sequence=["#D4A853"])
+    fig.update_layout(
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="white"),
+        showlegend=False
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+def render_128_combinations():
+    st.markdown("""
+        <div style="display: flex; justify-content: center; width: 100%; margin: 0.1rem 0 1.5rem 0;">
+            <p class="section-headline">📊 Alle 128 Kombinationen</p>
+        </div>
+    """, unsafe_allow_html=True)
+    combinations = get_all_128_combinations()
+    df = pd.DataFrame(combinations, columns=["Index", "Bits", "Tor-Bonus"])
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+# ============================================================
+# 5. STREAMLIT-STYLING (CSS)
+# ============================================================
+
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+    * { font-family: 'Inter', sans-serif; box-sizing: border-box; margin: 0; padding: 0; }
+    .stApp { background: linear-gradient(160deg, #0A0A0A 0%, #1A1A1A 35%, #222222 65%, #0A0A0A 100%); min-height: 100vh; }
+    .stApp::before { content: ''; position: fixed; top: -20%; left: -20%; width: 140%; height: 140%; background: radial-gradient(ellipse at 40% 30%, rgba(212, 168, 83, 0.03) 0%, transparent 60%); pointer-events: none; z-index: 0; }
+    .main > div { background: transparent; max-width: 1300px; margin: 0 auto; padding: 2rem 2rem 4rem 2rem; position: relative; z-index: 1; }
+    .block-container { padding-top: 1.5rem; padding-bottom: 4rem; max-width: 1300px; margin: 0 auto; }
+    
+    .title-wrapper { display: flex; justify-content: center; width: 100%; margin: 0 auto 1.2rem auto; max-width: 700px; white-space: nowrap; }
+    .main-title { font-size: 2.6rem; font-weight: 800; letter-spacing: 0.04em; text-align: center; margin: 0; color: #FFFFFF; line-height: 1.2; width: 100%; text-shadow: 0 2px 40px rgba(212, 168, 83, 0.05); white-space: nowrap; }
+    .main-title span { background: linear-gradient(135deg, #D4A853 0%, #F5D98E 50%, #D4A853 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+    
+    .section-headline { font-size: 1.1rem !important; font-weight: 500; text-transform: uppercase; letter-spacing: 0.15em; color: rgba(255, 255, 255, 0.35) !important; text-align: center; margin: 0; }
+    
+    .stDataFrame { background: rgba(255, 255, 255, 0.02) !important; backdrop-filter: blur(8px); border-radius: 16px !important; border: 1px solid rgba(255, 255, 255, 0.04) !important; overflow: hidden; margin: 0 auto 1rem auto; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3); }
+    .stDataFrame th { background: rgba(255, 255, 255, 0.03) !important; color: rgba(255, 255, 255, 0.2) !important; font-weight: 500 !important; font-size: 0.6rem !important; text-transform: uppercase !important; letter-spacing: 0.2em !important; text-align: center !important; padding: 0.8rem 1rem !important; border-bottom: 1px solid rgba(255, 255, 255, 0.03) !important; }
+    .stDataFrame td { background: transparent !important; color: rgba(255, 255, 255, 0.8) !important; text-align: center !important; padding: 0.7rem 1rem !important; font-size: 0.9rem !important; border-bottom: 1px solid rgba(255, 255, 255, 0.02) !important; }
+    .stDataFrame tr:hover td { background: rgba(255, 255, 255, 0.03) !important; }
+    .stDataFrame tr:last-child td { border-bottom: none !important; }
+</style>
+""", unsafe_allow_html=True)
+
+# ============================================================
+# 6. APP (HAUPTPROGRAMM)
+# ============================================================
+
+st.markdown("""
+    <div class="title-wrapper">
+        <h1 class="main-title">📊 SZENARIO <span>DASHBOARD</span></h1>
+    </div>
+""", unsafe_allow_html=True)
+
+st.sidebar.markdown("### 📖 Die 8 Schritte")
+st.sidebar.markdown("""
+1. **Team** – wähle ein WM-Team
+2. **8 KPIs** – je 2 Zustände (Form: 5 Zustände)
+3. **Bits** – stark = 1, schwach = 0 (Form nicht in Bits)
+4. **KPI-Bonus** – Anzahl der Bits (0–7)
+5. **Team-Basis-Bonus** – Klassifizierung (1.0–3.0)
+6. **Form-Faktor** – aus KPI (0.5–1.5)
+7. **Erwartete Tore (λ)** – mit Spielstil-Modulator
+8. **Poisson** – Wahrscheinlichkeiten für Ergebnisse
+""")
+st.sidebar.markdown("---")
+st.sidebar.caption("📅 Szenario Dashboard v4.0 (8 KPIs + Form)")
+
+st.markdown("""
+    <div style="display: flex; justify-content: center; width: 100%; margin: 0.1rem 0 1.5rem 0;">
+        <p class="section-headline">⚽ Team-KPIs eingeben</p>
+    </div>
+""", unsafe_allow_html=True)
+
+col1, col2 = st.columns(2, gap="medium")
+
+with col1:
+    team_a, kpis_a = render_team_input("🟡 Team A", "a", default_team="Frankreich")
+
+with col2:
+    team_b, kpis_b = render_team_input("🔵 Team B", "b", default_team="Norwegen")
+
+# ─── BERECHNUNG ───
+team_a_obj = TeamScenario(team_a, kpis_a)
+team_b_obj = TeamScenario(team_b, kpis_b)
+match = MatchScenario(team_a_obj, team_b_obj)
+
+st.markdown("---")
+
+render_calculation_pipeline(match)
+render_match_analysis(match)
+render_scenario(match)
+render_scenario_analysis(match)
+render_best_guess(match)
+render_possible_results(match)
+
+render_kpi_comparison(kpis_a, kpis_b, team_a, team_b)
+
+render_bonus_distribution()
+render_128_combinations()
